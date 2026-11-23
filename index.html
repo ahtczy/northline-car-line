@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="%BASE_URL%favicon.svg" type="image/svg+xml" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Northline · final assembly</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="view"></canvas>
+      <header id="top"></header>
+      <div id="banner"></div>
+      <aside id="inspect" hidden></aside>
+      <div id="dock"></div>
+      <div id="transport"></div>
+      <div id="camtools"></div>
+      <p id="credit"></p>
+      <div id="verdict" hidden></div>
+      <div id="credits-dialog" hidden></div>
+      <div id="boot">
+        <p>Setting the hall</p>
+        <div class="bar"><span id="bootbar"></span></div>
+        <small id="bootlabel">Loading SimReady models</small>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
