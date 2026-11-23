@@ -5,6 +5,7 @@ import { RGBELoader } from 'three/addons/loaders/RGBELoader.js'
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import type { LinePlan } from '../sim/line.ts'
 import { prepareLoadedModel } from './budget.ts'
+import { sealCarShell } from './shell.ts'
 
 const PLANT = `${import.meta.env.BASE_URL}models/plant`
 const STATION_X = [-58, -43.2, -28.4, -13.6, 1.2, 16, 30.8]
@@ -114,6 +115,9 @@ export async function createHall(
         if (Array.isArray(mat)) return
         if (mat && 'envMapIntensity' in mat) (mat as THREE.MeshStandardMaterial).envMapIntensity = 0.62
       })
+      // Close the shell on the full tessellation. Simplifying first would
+      // open the same gaps the seal is meant to cover.
+      if (file === 'body.glb') sealCarShell(gltf.scene)
       await prepareLoadedModel(gltf.scene, file)
       cache.set(file, gltf.scene)
       return gltf.scene
@@ -569,9 +573,11 @@ function buildFleet(kit: Kit): CarView[] {
     const seats = partGroup(false, kit.seat, kit.rear)
     const power = partGroup(false, kit.v6, kit.trans, kit.exhaust)
     const wheels = wheelSet(kit)
-    placeInBody(dash, kit, 0.72, 0.62, 0)
-    placeInBody(seats, kit, -0.05, 0.5, 0)
-    placeInBody(power, kit, 0.55, 0.22, 0)
+    // Fractions of the shell box. The dash sits at the cowl, the powertrain
+    // in the bay under the hood, and the seats in the cabin.
+    placeInBody(dash, kit, 0.28, 0.58, 0)
+    placeInBody(seats, kit, -0.08, 0.46, 0)
+    placeInBody(power, kit, 0.8, 0.18, 0)
     lift.add(dash, seats, power, wheels)
 
     const view: CarView = { root, lift, dash, seats, power, wheels, shellMat }
@@ -583,24 +589,31 @@ function buildFleet(kit: Kit): CarView[] {
 }
 
 function paintShell(root: THREE.Object3D): THREE.MeshPhysicalMaterial | null {
-  let painted: THREE.MeshPhysicalMaterial | null = null
+  const painted = new THREE.MeshPhysicalMaterial({
+    name: 'bodyPaint',
+    color: 0x2c3238,
+    metalness: 0.64,
+    roughness: 0.2,
+    clearcoat: 1,
+    clearcoatRoughness: 0.06,
+    envMapIntensity: 0.45,
+    // The SimReady shell is double-sided. A front-only paint drops every
+    // sheet whose winding faces inward, and the car reads as torn open.
+    side: THREE.DoubleSide,
+  })
+  let found = false
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh
-    if (!mesh.isMesh || painted) return
-    const prev = mesh.material as THREE.MeshStandardMaterial
-    if (Array.isArray(prev)) return
-    if (!/aluminium|body|paint|clear/i.test(`${prev?.name ?? ''} ${mesh.name}`)) return
-    painted = new THREE.MeshPhysicalMaterial({
-      color: 0x2c3238,
-      metalness: 0.64,
-      roughness: 0.2,
-      clearcoat: 1,
-      clearcoatRoughness: 0.06,
-      envMapIntensity: 0.45,
-    })
-    mesh.material = painted
+    if (!mesh.isMesh || mesh.userData.glass) return
+    const prev = mesh.material as THREE.Material
+    if (!prev || Array.isArray(prev)) return
+    const label = `${prev.name ?? ''} ${mesh.name}`
+    if (mesh.userData.shell || /aluminium|bodyShell|bodyPaint/i.test(label)) {
+      mesh.material = painted
+      found = true
+    }
   })
-  return painted
+  return found ? painted : null
 }
 
 function partGroup(cast: boolean, ...sources: THREE.Object3D[]) {
@@ -676,7 +689,10 @@ function wheelSet(kit: Kit): THREE.Group {
 function enableCast(root: THREE.Object3D) {
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh
-    if (mesh.isMesh) mesh.castShadow = true
+    if (!mesh.isMesh) return
+    // Glass and the hidden inner frame do not need to join the shadow pass.
+    const hidden = mesh.userData.glass || /inside|shell_glass/i.test(mesh.name)
+    mesh.castShadow = !hidden
   })
 }
 
