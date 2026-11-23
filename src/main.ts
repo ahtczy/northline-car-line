@@ -69,6 +69,8 @@ controls.addEventListener('start', () => {
   fly = null
 })
 
+let viewRenderer: WebGPURenderer | null = null
+
 void boot()
 
 async function boot() {
@@ -76,20 +78,32 @@ async function boot() {
   const bar = document.getElementById('bootbar')
   const label = document.getElementById('bootlabel')
   try {
-    const renderer = new WebGPURenderer({ canvas, antialias: true })
+    // Chrome logs "No available adapters" and WebGPURenderer falls back to WebGL 2.
+    // Know that before init so the fallback does not also allocate a 4K shadow map
+    // and a 4x MSAA target — that combination stalls the GPU process and the tab dies.
+    const webgpu = await hasWebGPUAdapter()
+    const renderer = new WebGPURenderer({
+      canvas,
+      antialias: webgpu,
+      forceWebGL: !webgpu,
+    })
+    viewRenderer = renderer
     await renderer.init()
+    const glFallback = isWebGLBackend(renderer)
     renderer.shadowMap.enabled = true
     renderer.shadowMap.type = THREE.PCFShadowMap
     renderer.toneMapping = THREE.ACESFilmicToneMapping
     renderer.toneMappingExposure = 0.64
     renderer.outputColorSpace = THREE.SRGBColorSpace
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, glFallback ? 1 : 1.5))
 
     scene.add(new THREE.HemisphereLight(0xddd6c8, 0x6f6a60, 0.11))
     const sun = new THREE.DirectionalLight(0xfff1dc, 1.35)
     sun.position.set(-22, 34, 16)
     sun.castShadow = true
-    sun.shadow.mapSize.set(4096, 4096)
+    // The shadow camera covers the whole aisle. 4096 is a 64 MB+ depth target and
+    // a full extra pass of every caster; on WebGL that pass is what trips the stall.
+    sun.shadow.mapSize.set(glFallback ? 2048 : 4096, glFallback ? 2048 : 4096)
     const cam = sun.shadow.camera
     cam.left = -78
     cam.right = 58
@@ -117,7 +131,10 @@ async function boot() {
     resize()
     window.addEventListener('resize', resize)
     if (label) label.textContent = 'Compiling shaders'
-    await renderer.compileAsync(scene, camera)
+    await renderer.compileAsync(scene, camera, null, (event) => {
+      if (!bar || !event.lengthComputable || event.total <= 0) return
+      bar.style.width = `${Math.round((event.loaded / event.total) * 100)}%`
+    })
     if (bootEl) bootEl.hidden = true
 
     let last = performance.now()
@@ -243,6 +260,24 @@ function resize() {
   camera.aspect = width / Math.max(1, height)
   camera.updateProjectionMatrix()
   labelRenderer.setSize(width, height)
+  // The canvas CSS already fills the window. Size the drawing buffer to match,
+  // without writing inline width/height that would fight that CSS.
+  viewRenderer?.setSize(width, height, false)
+}
+
+async function hasWebGPUAdapter() {
+  const gpu = navigator.gpu
+  if (!gpu) return false
+  try {
+    const adapter = await gpu.requestAdapter({ featureLevel: 'compatibility' } as GPURequestAdapterOptions)
+    return adapter !== null
+  } catch {
+    return false
+  }
+}
+
+function isWebGLBackend(renderer: WebGPURenderer) {
+  return (renderer.backend as { isWebGLBackend?: boolean }).isWebGLBackend === true
 }
 
 function pose(target: THREE.Vector3, distance: number, azimuth: number, elevation: number) {

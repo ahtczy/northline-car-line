@@ -4,6 +4,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js'
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js'
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import type { LinePlan } from '../sim/line.ts'
+import { prepareLoadedModel } from './budget.ts'
 
 const PLANT = `${import.meta.env.BASE_URL}models/plant`
 const STATION_X = [-58, -43.2, -28.4, -13.6, 1.2, 16, 30.8]
@@ -113,6 +114,7 @@ export async function createHall(
         if (Array.isArray(mat)) return
         if (mat && 'envMapIntensity' in mat) (mat as THREE.MeshStandardMaterial).envMapIntensity = 0.62
       })
+      await prepareLoadedModel(gltf.scene, file)
       cache.set(file, gltf.scene)
       return gltf.scene
     } catch (err) {
@@ -226,23 +228,64 @@ async function buildHall(scene: THREE.Scene, model: Loader) {
   const x0 = -78
   const group = new THREE.Group()
   group.name = 'hall'
-  const place = (src: THREE.Object3D, x: number, z: number, yaw: number) => {
-    const tile = src.clone(true)
-    tile.scale.set(fitXZ, fitY, fitXZ)
-    tile.rotation.y = yaw
-    tile.position.set(x, 0, z)
-    group.add(tile)
-  }
+  // One instanced draw per hall material instead of a deep clone per bay.
+  // fitY matches fitXZ, so the instance scale stays uniform.
+  const straightSlots: TileSlot[] = []
+  const centerSlots: TileSlot[] = []
   for (let i = 0; i < 9; i++) {
     const x = x0 + (i + 0.5) * cell
-    place(i % 3 === 0 ? center : straight, x, -20, 0)
-    if (i % 2 === 0) place(center, x, 18, Math.PI)
+    ;(i % 3 === 0 ? centerSlots : straightSlots).push({ x, z: -20, yaw: 0 })
+    if (i % 2 === 0) centerSlots.push({ x, z: 18, yaw: Math.PI })
   }
-  place(corner, x0 + 0.4 * cell, -20, 0)
-  place(corner, x0 + 8.4 * cell, -20, Math.PI / 2)
+  instanceCopies(group, straight, straightSlots, fitXZ)
+  instanceCopies(group, center, centerSlots, fitY)
+  instanceCopies(group, corner, [
+    { x: x0 + 0.4 * cell, z: -20, yaw: 0 },
+    { x: x0 + 8.4 * cell, z: -20, yaw: Math.PI / 2 },
+  ], fitXZ)
   scene.add(group)
   roofBeams(scene)
   columnBases(scene)
+}
+
+type TileSlot = { x: number, z: number, yaw: number }
+
+function instanceCopies(parent: THREE.Object3D, src: THREE.Object3D, slots: TileSlot[], scale: number) {
+  if (!slots.length) return
+  src.updateWorldMatrix(true, true)
+  const up = new THREE.Vector3(0, 1, 0)
+  const q = new THREE.Quaternion()
+  const p = new THREE.Vector3()
+  const s = new THREE.Vector3(scale, scale, scale)
+  const placement = new THREE.Matrix4()
+  const local = new THREE.Matrix4()
+  const m = new THREE.Matrix4()
+  const meshes: THREE.Mesh[] = []
+  src.traverse((obj) => {
+    const mesh = obj as THREE.Mesh
+    if (mesh.isMesh && mesh.geometry) meshes.push(mesh)
+  })
+  for (const mesh of meshes) {
+    // Keep the source geometry. Hall positions are mesh-quantized, so baking
+    // mesh.matrixWorld into the vertex buffer drops the node scale and the
+    // bays collapse to a couple of metres. The instance matrix carries it.
+    const inst = new THREE.InstancedMesh(mesh.geometry, mesh.material, slots.length)
+    inst.castShadow = false
+    inst.receiveShadow = true
+    inst.frustumCulled = false
+    local.copy(mesh.matrixWorld)
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i]
+      if (!slot) continue
+      p.set(slot.x, 0, slot.z)
+      q.setFromAxisAngle(up, slot.yaw)
+      placement.compose(p, q, s)
+      m.multiplyMatrices(placement, local)
+      inst.setMatrixAt(i, m)
+    }
+    inst.instanceMatrix.needsUpdate = true
+    parent.add(inst)
+  }
 }
 
 function recolorHall(root: THREE.Object3D) {
@@ -358,14 +401,20 @@ function buildMarkings(scene: THREE.Scene) {
   aisle.receiveShadow = true
   scene.add(aisle)
   const dash = new THREE.BoxGeometry(1.7, 0.025, 0.16)
+  const marks: { x: number, z: number }[] = []
   for (const z of [-2.15, 2.15]) {
-    for (let x = -78; x <= 48; x += 2.3) {
-      const mark = new THREE.Mesh(dash, yellow)
-      mark.position.set(x, 0.03, z)
-      mark.receiveShadow = true
-      scene.add(mark)
-    }
+    for (let x = -78; x <= 48; x += 2.3) marks.push({ x, z })
   }
+  const markMesh = new THREE.InstancedMesh(dash, yellow, marks.length)
+  markMesh.receiveShadow = true
+  const markMatrix = new THREE.Matrix4()
+  marks.forEach((mark, index) => {
+    markMatrix.makeTranslation(mark.x, 0.03, mark.z)
+    markMesh.setMatrixAt(index, markMatrix)
+  })
+  markMesh.instanceMatrix.needsUpdate = true
+  markMesh.computeBoundingSphere()
+  scene.add(markMesh)
   for (let i = 0; i < 7; i++) {
     const x = STATION_X[i] ?? 0
     const pad = new THREE.Mesh(
@@ -515,9 +564,10 @@ function buildFleet(kit: Kit): CarView[] {
     enableCast(shell)
     lift.add(shell)
 
-    const dash = partGroup(kit.dash, kit.steer)
-    const seats = partGroup(kit.seat, kit.rear)
-    const power = partGroup(kit.v6, kit.trans, kit.exhaust)
+    // Interior parts sit inside the shell, so they do not change the contact shadow.
+    const dash = partGroup(false, kit.dash, kit.steer)
+    const seats = partGroup(false, kit.seat, kit.rear)
+    const power = partGroup(false, kit.v6, kit.trans, kit.exhaust)
     const wheels = wheelSet(kit)
     placeInBody(dash, kit, 0.72, 0.62, 0)
     placeInBody(seats, kit, -0.05, 0.5, 0)
@@ -553,11 +603,11 @@ function paintShell(root: THREE.Object3D): THREE.MeshPhysicalMaterial | null {
   return painted
 }
 
-function partGroup(...sources: THREE.Object3D[]) {
+function partGroup(cast: boolean, ...sources: THREE.Object3D[]) {
   const g = new THREE.Group()
   for (const src of sources) {
     const clone = src.clone(true)
-    enableCast(clone)
+    if (cast) enableCast(clone)
     g.add(clone)
   }
   return g
