@@ -1,19 +1,24 @@
 import * as THREE from 'three'
 
 /**
- * The vendored body is a body-in-white frame, not a closed shell. The roof
- * center and the hood are open, the side glass is empty, and the nose is only
- * rails. Some sheets are also wound inward; the paint material has to draw
- * both sides or those panels vanish. This builds the missing skin and glass
- * in the body's own meter space so the car reads as one shell.
+ * The vendored body is an open body-in-white: roof, hood, glass, and both
+ * ends are missing, and the sheets that remain are torn around the wheel
+ * wells. Patching those holes left the torn metal in frame. This replaces
+ * the donor skin with one closed shell in the body's meter space — roof,
+ * hood, sides, rocker, nose, and tail — and glazed openings. Paint is applied
+ * later so every panel of a car shares one clearcoat.
  */
 
-const GLASS = new THREE.MeshStandardMaterial({
+const STEP = 0.05
+
+const GLASS = new THREE.MeshPhysicalMaterial({
   name: 'shellGlass',
-  color: 0x243038,
-  metalness: 0.72,
-  roughness: 0.12,
-  envMapIntensity: 1.05,
+  color: 0x1a242c,
+  metalness: 0.12,
+  roughness: 0.04,
+  clearcoat: 1,
+  clearcoatRoughness: 0.03,
+  envMapIntensity: 1.65,
   side: THREE.DoubleSide,
 })
 
@@ -32,24 +37,50 @@ export function sealCarShell(root: THREE.Object3D): void {
   const profile = measure(tris, down, side)
   const shellMat = new THREE.MeshStandardMaterial({
     name: 'bodyShell',
-    color: 0xd7d3cb,
-    metalness: 0.46,
-    roughness: 0.34,
-    envMapIntensity: 0.5,
+    color: 0xc5ced6,
+    metalness: 0.9,
+    roughness: 0.24,
+    envMapIntensity: 1.1,
     side: THREE.DoubleSide,
   })
   const metal = new Builder()
   const glass = new Builder()
   addRoof(metal, profile)
-  addHood(metal, down, profile)
+  addHood(metal, profile)
   addNose(metal, profile)
-  addFenders(metal, side, profile)
-  addSideSkins(metal, glass, side, profile)
+  addTail(metal, profile)
+  addFloor(metal, profile)
+  addSideSkins(metal, profile)
+  addPillars(metal, profile)
+  addArchRings(metal, profile)
+  addSideGlass(glass, profile)
   addScreens(glass, profile)
   finish(root, metal, 'shell_seal', shellMat, true)
   finish(root, glass, 'shell_glass', GLASS, false)
+  root.userData.axles = profile.arches.map((arch) => ({
+    x: arch.x,
+    y: 0.34,
+    z: skinHalf(profile, arch.x, 0.34) - 0.09,
+  }))
+  dropDonor(root)
   root.userData.sealed = true
   root.userData.sealNote = profile.note
+}
+
+function dropDonor(root: THREE.Object3D): void {
+  const drop: THREE.Mesh[] = []
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh
+    if (mesh.isMesh && !mesh.userData.seal) drop.push(mesh)
+  })
+  for (const mesh of drop) {
+    mesh.geometry?.dispose()
+    mesh.removeFromParent()
+  }
+}
+
+function qIndex(v: number): number {
+  return Math.round(v / STEP)
 }
 
 interface Profile {
@@ -61,18 +92,28 @@ interface Profile {
   roofZ: number
   hoodX0: number
   noseX: number
+  tailX: number
   hoodY0: number
   hoodY1: number
   sideZ: number
   belt: number
+  widthX0: number
+  widthStep: number
+  width: Float32Array
   arches: { x: number, y: number, r: number }[]
   note: string
 }
 
 function measure(tris: Float32Array, down: Grid, side: Grid): Profile {
   let noseX = -Infinity
+  let tailX = Infinity
   const n = tris.length / 9
-  for (let t = 0; t < n; t++) noseX = Math.max(noseX, tris[t * 9], tris[t * 9 + 3], tris[t * 9 + 6])
+  for (let t = 0; t < n; t++) {
+    for (const k of [0, 3, 6]) {
+      noseX = Math.max(noseX, tris[t * 9 + k])
+      tailX = Math.min(tailX, tris[t * 9 + k])
+    }
+  }
   const columns: { x: number, width: number, y: number, z: number }[] = []
   for (let x = -2.2; x <= 1.4; x += 0.06) {
     let width = 0
@@ -125,13 +166,11 @@ function measure(tris: Float32Array, down: Grid, side: Grid): Profile {
   const sideZ = sideHits.length ? sideHits[Math.floor(sideHits.length / 2)] : 0.86
   const arches = findArches(side, sideZ)
   const beltCapped = Math.min(0.84, belt)
-  const note = `roof ${roofX0.toFixed(2)}..${roofX1.toFixed(2)} y${roofY.toFixed(2)} peak ${roofPeak.toFixed(2)} z${roofZ.toFixed(2)} belt ${beltCapped.toFixed(2)} sideZ ${sideZ.toFixed(2)} nose ${noseX.toFixed(2)} arches ${arches.map((a) => a.x.toFixed(2)).join(',')}`
-  return { roofX0, roofX1, roofY, roofPeak, railY, roofZ, hoodX0, noseX, hoodY0, hoodY1, sideZ, belt: beltCapped, arches, note }
-}
-
-function onThisSide(hit: number | null, sign: number, sideZ: number): boolean {
-  if (hit == null) return false
-  return Math.sign(hit) === Math.sign(sign) && Math.abs(hit) > sideZ - 0.22
+  const widthX0 = -2.55
+  const widthStep = 0.05
+  const width = sampleWidth(tris, widthX0, widthStep)
+  const note = `roof ${roofX0.toFixed(2)}..${roofX1.toFixed(2)} rail ${railY.toFixed(2)} belt ${beltCapped.toFixed(2)} sideZ ${sideZ.toFixed(2)} x ${tailX.toFixed(2)}..${noseX.toFixed(2)} arches ${arches.map((a) => a.x.toFixed(2)).join(',')}`
+  return { roofX0, roofX1, roofY, roofPeak, railY, roofZ, hoodX0, noseX, tailX, hoodY0, hoodY1, sideZ, belt: beltCapped, arches, widthX0, widthStep, width, note }
 }
 
 function findArches(side: Grid, sideZ: number): { x: number, y: number, r: number }[] {
@@ -151,35 +190,46 @@ function findArches(side: Grid, sideZ: number): { x: number, y: number, r: numbe
   }
   const found = clusters
     .filter((c) => c.length > 3)
-    .map((c) => ({ x: c[Math.floor(c.length / 2)], y: 0.34, r: 0.48 }))
-  if (!found.some((a) => a.x > 0.4)) found.push({ x: 1.45, y: 0.36, r: 0.42 })
-  for (const arch of found) arch.r = Math.min(arch.r, 0.42)
+    .map((c) => ({ x: c[Math.floor(c.length / 2)], y: 0.34, r: 0.36 }))
+  if (!found.some((a) => a.x > 0.4)) found.push({ x: 1.45, y: 0.34, r: 0.36 })
+  if (!found.some((a) => a.x < -0.4)) found.push({ x: -1.55, y: 0.34, r: 0.36 })
+  for (const arch of found) arch.r = 0.36
   return found
 }
 
+function lat(v: number): number {
+  return qIndex(v) * STEP
+}
+
 function addRoof(metal: Builder, p: Profile): void {
-  const step = 0.08
-  const x0 = p.roofX0 + 0.02
-  const x1 = p.roofX1 - 0.02
-  const zMax = Math.max(p.roofZ, p.sideZ - 0.04)
-  for (let x = x0; x < x1 - step; x += step) {
-    for (let z = -zMax; z < zMax - step; z += step) {
+  const i0 = qIndex(p.roofX0 + 0.02)
+  const i1 = qIndex(p.roofX1 - 0.02)
+  const edgeY = lat(p.railY)
+  for (let i = i0; i < i1; i++) {
+    const x0 = i * STEP
+    const x1 = (i + 1) * STEP
+    const span = skinHalf(p, (x0 + x1) / 2, edgeY)
+    const cols = Math.max(6, Math.round((span * 2) / STEP))
+    for (let c = 0; c < cols; c++) {
+      const za = -span + (2 * span * c) / cols
+      const zb = -span + (2 * span * (c + 1)) / cols
       const ids = [
-        metal.at(x, roofHeight(p, x, z), z),
-        metal.at(x + step, roofHeight(p, x + step, z), z),
-        metal.at(x + step, roofHeight(p, x + step, z + step), z + step),
-        metal.at(x, roofHeight(p, x, z + step), z + step),
+        metal.at(x0, roofHeight(p, za), za),
+        metal.at(x1, roofHeight(p, za), za),
+        metal.at(x1, roofHeight(p, zb), zb),
+        metal.at(x0, roofHeight(p, zb), zb),
       ]
       metal.quad(ids[0], ids[3], ids[2], ids[1])
     }
   }
 }
 
-function roofHeight(p: Profile, _x: number, z: number): number {
-  const half = Math.max(0.2, p.roofZ * 0.86)
-  const span = 1 - Math.min(1, Math.pow(z / half, 2))
-  // Edges sit on the cant rail. The crown rises just enough to cover the ribs.
-  return p.railY + 0.008 + Math.max(0, p.roofPeak - p.railY) * span
+function roofHeight(p: Profile, z: number): number {
+  const edge = lat(p.railY)
+  const half = Math.max(0.25, p.sideZ)
+  const u = Math.min(1, Math.abs(z) / half)
+  const crown = Math.max(0.025, p.roofPeak - p.railY)
+  return edge + crown * (1 - u * u)
 }
 
 function hoodHeight(p: Profile, x: number, z: number): number {
@@ -190,49 +240,244 @@ function hoodHeight(p: Profile, x: number, z: number): number {
   return base + crown
 }
 
-function addHood(metal: Builder, down: Grid, p: Profile): void {
-  const x1 = p.noseX - 0.02
-  const step = 0.07
-  const zMax = p.sideZ - 0.015
-  for (let x = p.hoodX0; x < x1 - step; x += step) {
-    for (let z = -zMax; z < zMax - step; z += step) {
-      const probe = ray(down, 0, 2, 1, x + step / 2, z + step / 2, 3, -1)
-      const y = hoodHeight(p, x, z)
-      if (probe != null && probe > y - 0.05) continue
+function addHood(metal: Builder, p: Profile): void {
+  const i0 = qIndex(p.hoodX0)
+  const i1 = qIndex(p.noseX + 0.012)
+  for (let i = i0; i < i1; i++) {
+    const x0 = i * STEP
+    const x1 = (i + 1) * STEP
+    const h0 = skinHalf(p, x0, sideTop(p, x0))
+    const h1 = skinHalf(p, x1, sideTop(p, x1))
+    const cols = Math.max(6, Math.round((h0 + h1) / STEP))
+    for (let c = 0; c < cols; c++) {
+      const u0 = c / cols
+      const u1 = (c + 1) / cols
+      const zAt = (h: number, u: number) => (u <= 0 ? -h : u >= 1 ? h : -h + 2 * h * u)
+      const yAt = (x: number, z: number, outer: boolean) => (outer ? sideTop(p, x) : hoodHeight(p, x, z))
+      const z00 = zAt(h0, u0)
+      const z01 = zAt(h0, u1)
+      const z10 = zAt(h1, u0)
+      const z11 = zAt(h1, u1)
       const ids = [
-        metal.at(x, hoodHeight(p, x, z), z),
-        metal.at(x + step, hoodHeight(p, x + step, z), z),
-        metal.at(x + step, hoodHeight(p, x + step, z + step), z + step),
-        metal.at(x, hoodHeight(p, x, z + step), z + step),
+        metal.at(x0, yAt(x0, z00, u0 <= 0 || u0 >= 1), z00),
+        metal.at(x1, yAt(x1, z10, u0 <= 0 || u0 >= 1), z10),
+        metal.at(x1, yAt(x1, z11, u1 <= 0 || u1 >= 1), z11),
+        metal.at(x0, yAt(x0, z01, u1 <= 0 || u1 >= 1), z01),
       ]
       metal.quad(ids[0], ids[3], ids[2], ids[1])
     }
   }
 }
 
-function addFenders(metal: Builder, side: Grid, p: Profile): void {
-  const front = p.arches.find((arch) => arch.x > 0.4) ?? { x: 1.45, y: 0.36, r: 0.4 }
-  const x0 = front.x - 0.55
-  const x1 = p.noseX - 0.02
-  const step = 0.055
-  for (const sign of [1, -1]) {
-    for (let x = x0; x < x1 - step; x += step) {
-      const y1 = hoodHeight(p, x, sign * 0.7) - 0.005
-      for (let y = 0.4; y < y1 - step; y += step) {
-        const dx = x + step / 2 - front.x
-        const dy = y + step / 2 - 0.36
-        if (dx * dx + dy * dy < 0.36 * 0.36) continue
-        const hit = ray(side, 0, 1, 2, x + step / 2, y + step / 2, sign * 2, -sign)
-        if (onThisSide(hit, sign, p.sideZ)) continue
-        const zAt = (xx: number) => {
-          const t = Math.max(0, (xx - front.x) / Math.max(0.2, x1 - front.x))
-          return sign * (p.sideZ - 0.008 - t * 0.1)
-        }
+function inWheel(p: Profile, x: number, y: number): boolean {
+  for (const arch of p.arches) {
+    const dx = x - arch.x
+    const dy = y - 0.34
+    if (dx * dx + dy * dy < 0.36 * 0.36) return true
+  }
+  return false
+}
+
+function windowRects(p: Profile): [number, number, number, number][] {
+  const bottom = lat(Math.min(p.belt, 0.8)) + STEP
+  const rail = lat(p.railY)
+  return [
+    [lat(p.roofX0 + 0.2), lat(p.roofX0 + 0.56), bottom, lat(rail - 0.1)],
+    [lat(p.roofX0 + 0.78), lat(-0.16), bottom, lat(rail - 0.08)],
+    [lat(0.12), lat(p.roofX1 - 0.04), bottom, lat(bottom + 0.3)],
+  ]
+}
+
+function inWindow(p: Profile, x: number, y: number): boolean {
+  for (const [x0, x1, y0, y1] of windowRects(p)) {
+    if (x > x0 && x < x1 && y > y0 && y < y1) return true
+  }
+  return false
+}
+
+function sampleWidth(tris: Float32Array, x0: number, step: number): Float32Array {
+  const bins = 110
+  const lists: number[][] = Array.from({ length: bins }, () => [])
+  const n = tris.length / 9
+  for (let t = 0; t < n; t++) {
+    let x = 0
+    let y = 0
+    let z = 0
+    for (let k = 0; k < 3; k++) {
+      x += tris[t * 9 + k * 3]
+      y += tris[t * 9 + k * 3 + 1]
+      z += Math.abs(tris[t * 9 + k * 3 + 2])
+    }
+    x /= 3
+    y /= 3
+    z /= 3
+    if (y < 0.28 || y > 1.18 || z < 0.4) continue
+    const i = Math.floor((x - x0) / step)
+    if (i >= 0 && i < bins) lists[i].push(z)
+  }
+  const raw = new Float32Array(bins)
+  for (let i = 0; i < bins; i++) {
+    const row = lists[i].sort((a, b) => a - b)
+    raw[i] = row.length ? row[Math.min(row.length - 1, Math.floor(row.length * 0.97))] : 0
+  }
+  for (let i = 0; i < bins; i++) {
+    if (raw[i] > 0) continue
+    let a = i - 1
+    let b = i + 1
+    while (a >= 0 && raw[a] === 0) a--
+    while (b < bins && raw[b] === 0) b++
+    const za = a >= 0 ? raw[a] : 0
+    const zb = b < bins ? raw[b] : 0
+    if (za && zb) raw[i] = za + (zb - za) * ((i - a) / (b - a))
+    else raw[i] = za || zb
+  }
+  const out = new Float32Array(bins)
+  const rad = 3
+  for (let i = 0; i < bins; i++) {
+    let sum = 0
+    let count = 0
+    for (let k = -rad; k <= rad; k++) {
+      const j = i + k
+      if (j < 0 || j >= bins || raw[j] === 0) continue
+      sum += raw[j]
+      count++
+    }
+    out[i] = count ? sum / count : 0
+  }
+  return out
+}
+
+function planWidth(p: Profile, x: number): number {
+  // The donor's outer vertices jump around the torn flanges. Tracing them
+  // made the rocker a scalloped foil edge. The shell uses a smooth plan
+  // instead: door width, a flare over each arch, a short taper at the ends.
+  let flare = 0
+  for (const arch of p.arches) {
+    const dx = Math.abs(x - arch.x)
+    if (dx < 0.62) flare = Math.max(flare, 0.05 * Math.cos((dx / 0.62) * Math.PI * 0.5))
+  }
+  let taper = 1
+  const noseRun = 0.7
+  const tailRun = 0.55
+  if (x > p.noseX - noseRun) {
+    const t = (x - (p.noseX - noseRun)) / noseRun
+    taper = 1 - 0.14 * t * t
+  } else if (x < p.tailX + tailRun) {
+    const t = ((p.tailX + tailRun) - x) / tailRun
+    taper = 1 - 0.08 * t * t
+  }
+  return (p.sideZ + flare) * taper
+}
+
+function crease(y: number, belt: number): number {
+  if (y < 0.2) return -0.008
+  const d = (y - belt) / 0.05
+  if (d > -1.2 && d < 1.2) return 0.007 * (1 - Math.min(1, d * d))
+  return 0
+}
+
+function skinHalf(p: Profile, x: number, y: number): number {
+  return planWidth(p, x) + crease(y, p.belt)
+}
+
+function sideTop(p: Profile, x: number): number {
+  if (x < p.roofX0) {
+    const t = Math.min(1, (p.roofX0 - x) / 0.7)
+    return p.railY + (0.86 - p.railY) * t
+  }
+  if (x <= p.roofX1) return p.railY
+  if (x >= p.hoodX0) return hoodHeight(p, x, planWidth(p, x))
+  const t = (x - p.roofX1) / Math.max(0.2, p.hoodX0 - p.roofX1)
+  const hood = hoodHeight(p, p.hoodX0, planWidth(p, p.hoodX0))
+  return p.railY + (hood - p.railY) * t
+}
+
+function addNose(metal: Builder, p: Profile): void {
+  cap(metal, qIndex(p.noseX + 0.012) * STEP, 1, p)
+}
+
+function addTail(metal: Builder, p: Profile): void {
+  cap(metal, qIndex(p.tailX - 0.01) * STEP, -1, p)
+}
+
+function cap(metal: Builder, x: number, dir: number, p: Profile): void {
+  const j0 = qIndex(0.05)
+  const top = sideTop(p, x)
+  const j1 = Math.floor((top - 1e-4) / STEP)
+  const rows: [number, number][] = []
+  for (let j = j0; j < j1; j++) rows.push([j * STEP, (j + 1) * STEP])
+  const yLast = Math.max(j0, j1) * STEP
+  if (top - yLast > 0.004) rows.push([yLast, top])
+  const cols = 12
+  for (const [y0, y1] of rows) {
+    const h0 = skinHalf(p, x, y0)
+    const h1 = skinHalf(p, x, y1)
+    for (let c = 0; c < cols; c++) {
+      const u0 = c / cols
+      const u1 = (c + 1) / cols
+      const z = (h: number, u: number) => (u === 0 ? -h : u === 1 ? h : -h + 2 * h * u)
+      const ids = [
+        metal.at(x, y0, z(h0, u0)),
+        metal.at(x, y0, z(h0, u1)),
+        metal.at(x, y1, z(h1, u1)),
+        metal.at(x, y1, z(h1, u0)),
+      ]
+      if (dir > 0) metal.quad(ids[0], ids[1], ids[2], ids[3])
+      else metal.quad(ids[0], ids[3], ids[2], ids[1])
+    }
+  }
+}
+
+function addFloor(metal: Builder, p: Profile): void {
+  const y = qIndex(0.05) * STEP
+  const i0 = qIndex(p.tailX - 0.01)
+  const i1 = qIndex(p.noseX + 0.012)
+  for (let i = i0; i < i1; i++) {
+    const x0 = i * STEP
+    const x1 = (i + 1) * STEP
+    if (p.arches.some((arch) => Math.abs((x0 + x1) / 2 - arch.x) < 0.42)) continue
+    const h0 = skinHalf(p, x0, y)
+    const h1 = skinHalf(p, x1, y)
+    const cols = 8
+    for (let c = 0; c < cols; c++) {
+      const u0 = c / cols
+      const u1 = (c + 1) / cols
+      const z = (h: number, u: number) => (u === 0 ? -h : u === 1 ? h : -h + 2 * h * u)
+      const ids = [
+        metal.at(x0, y, z(h0, u0)),
+        metal.at(x1, y, z(h1, u0)),
+        metal.at(x1, y, z(h1, u1)),
+        metal.at(x0, y, z(h0, u1)),
+      ]
+      metal.quad(ids[0], ids[3], ids[2], ids[1])
+    }
+  }
+}
+
+function addSideSkins(metal: Builder, p: Profile): void {
+  const i0 = qIndex(p.tailX - 0.01)
+  const i1 = qIndex(p.noseX + 0.012)
+  const j0 = qIndex(0.05)
+  for (let i = i0; i < i1; i++) {
+    const x0 = i * STEP
+    const x1 = (i + 1) * STEP
+    const top0 = sideTop(p, x0)
+    const top1 = sideTop(p, x1)
+    const jTop = Math.floor((Math.min(top0, top1) - 1e-4) / STEP)
+    const bands: [number, number, number, number][] = []
+    for (let j = j0; j < jTop; j++) bands.push([j * STEP, (j + 1) * STEP, j * STEP, (j + 1) * STEP])
+    const yBase = Math.max(j0, jTop) * STEP
+    if (top0 - yBase > 0.004 || top1 - yBase > 0.004) bands.push([yBase, top0, yBase, top1])
+    for (const [y00, y01, y10, y11] of bands) {
+      const cy = ((y00 + y01) / 2 + (y10 + y11) / 2) / 2
+      if (inWheel(p, (x0 + x1) / 2, cy)) continue
+      if (inWindow(p, (x0 + x1) / 2, cy)) continue
+      for (const sign of [1, -1]) {
         const ids = [
-          metal.at(x, y, zAt(x)),
-          metal.at(x + step, y, zAt(x + step)),
-          metal.at(x + step, y + step, zAt(x + step)),
-          metal.at(x, y + step, zAt(x)),
+          metal.at(x0, y00, sign * skinHalf(p, x0, y00)),
+          metal.at(x1, y10, sign * skinHalf(p, x1, y10)),
+          metal.at(x1, y11, sign * skinHalf(p, x1, y11)),
+          metal.at(x0, y01, sign * skinHalf(p, x0, y01)),
         ]
         if (sign > 0) metal.quad(ids[0], ids[1], ids[2], ids[3])
         else metal.quad(ids[0], ids[3], ids[2], ids[1])
@@ -241,74 +486,88 @@ function addFenders(metal: Builder, side: Grid, p: Profile): void {
   }
 }
 
-function archTop(p: Profile, x: number): number {
-  let y = 0.38
-  for (const arch of p.arches) {
-    const dx = x - arch.x
-    if (Math.abs(dx) >= arch.r) continue
-    y = Math.max(y, arch.y + Math.sqrt(arch.r * arch.r - dx * dx))
-  }
-  return y
-}
-
-function addNose(metal: Builder, p: Profile): void {
-  const step = 0.08
-  const xNose = p.noseX + 0.018
-  const yTop = 0.72
-  for (let z = -0.74; z < 0.74 - step; z += step) {
-    for (let y = 0.1; y < yTop - step; y += step) {
-      const ids = [z, z + step].flatMap((zz) => [y, y + step].map((yy) => metal.at(xAt(xNose, zz, yy), yy, zz)))
-      metal.quad(ids[0], ids[1], ids[3], ids[2])
-    }
-  }
-}
-
-function xAt(nose: number, z: number, y: number): number {
-  return nose - 0.05 * Math.pow(z / 0.9, 2) - Math.max(0, 0.42 - y) * 0.03
-}
-
-function outerAt(side: Grid, p: Profile, sign: number, x: number): number {
-  let best = 0
-  for (const dx of [0, -0.1, 0.1, -0.2, 0.2]) {
-    for (const y of [0.7, 0.55, 0.96, 0.46]) {
-      const hit = ray(side, 0, 1, 2, x + dx, y, sign * 2, -sign)
-      if (hit != null && onThisSide(hit, sign, p.sideZ * 0.65)) best = Math.max(best, Math.abs(hit))
-    }
-  }
-  return best > 0.45 ? best : p.sideZ
-}
-
-function addSideSkins(metal: Builder, glass: Builder, side: Grid, p: Profile): void {
-  const step = 0.04
-  const doorX1 = (p.arches.find((arch) => arch.x > 0)?.x ?? p.roofX1 + 0.7) - 0.08
-  const pad = 0.08
-  for (const sign of [1, -1]) {
-    for (let x = p.roofX0 - 0.05; x < doorX1 - step; x += step) {
-      const yTop = x < p.roofX1 - 0.05 ? p.roofY - 0.06 : p.belt + 0.26
-      for (let y = 0.42; y < yTop - step; y += step) {
-        if (y < archTop(p, x) + 0.02) continue
-        const hit = ray(side, 0, 1, 2, x + step / 2, y + step / 2, sign * 2, -sign)
-        if (onThisSide(hit, sign, p.sideZ)) continue
-        const z = sign * (outerAt(side, p, sign, x) + 0.008)
-        const target = y + step * 0.5 > p.belt ? glass : metal
-        const ids = [
-          target.at(x - pad, y - pad, z),
-          target.at(x + step + pad, y - pad, z),
-          target.at(x + step + pad, y + step + pad, z),
-          target.at(x - pad, y + step + pad, z),
-        ]
-        if (sign > 0) target.quad(ids[0], ids[1], ids[2], ids[3])
-        else target.quad(ids[0], ids[3], ids[2], ids[1])
+function addPillars(metal: Builder, p: Profile): void {
+  const i0 = qIndex(p.roofX1 - 0.04)
+  const i1 = qIndex(p.hoodX0 + 0.06)
+  const glassZ = Math.min(0.7, p.sideZ - 0.12)
+  for (let i = i0; i < i1; i++) {
+    const x0 = i * STEP
+    const x1 = (i + 1) * STEP
+    const y0 = sideTop(p, x0)
+    const y1 = sideTop(p, x1)
+    for (const sign of [1, -1]) {
+      const zo0 = sign * skinHalf(p, x0, y0)
+      const zo1 = sign * skinHalf(p, x1, y1)
+      const zi = sign * glassZ
+      const header = [
+        metal.at(x0, y0, zo0),
+        metal.at(x1, y1, zo1),
+        metal.at(x1, y1, zi),
+        metal.at(x0, y0, zi),
+      ]
+      const frame = [
+        metal.at(x0, y0, zi),
+        metal.at(x1, y1, zi),
+        metal.at(x1, y1 - 0.07, zi),
+        metal.at(x0, y0 - 0.07, zi),
+      ]
+      if (sign > 0) {
+        metal.quad(header[0], header[3], header[2], header[1])
+        metal.quad(frame[0], frame[1], frame[2], frame[3])
+      } else {
+        metal.quad(header[0], header[1], header[2], header[3])
+        metal.quad(frame[0], frame[3], frame[2], frame[1])
       }
     }
   }
 }
 
+function addArchRings(metal: Builder, p: Profile): void {
+  const bands: [number, number, number][] = [[0.3, 0.4, 0.008], [0.4, 0.5, 0.018]]
+  const n = 32
+  for (const arch of p.arches) {
+    for (const sign of [1, -1]) {
+      for (let i = 0; i < n; i++) {
+        const a0 = (i / n) * Math.PI * 2
+        const a1 = ((i + 1) / n) * Math.PI * 2
+        for (const [r0, r1, push] of bands) {
+          const pt = (a: number, r: number) => ({ x: arch.x + Math.cos(a) * r, y: 0.34 + Math.sin(a) * r })
+          const corners = [pt(a0, r0), pt(a1, r0), pt(a1, r1), pt(a0, r1)]
+          if (corners.some((corner) => corner.y < 0.1)) continue
+          const at = (corner: { x: number, y: number }, extra: number) => (
+            metal.at(corner.x, corner.y, sign * (skinHalf(p, corner.x, corner.y) + extra))
+          )
+          const ids = [at(corners[0], push), at(corners[1], push), at(corners[2], push * 0.35), at(corners[3], push * 0.35)]
+          if (sign > 0) metal.quad(ids[0], ids[1], ids[2], ids[3])
+          else metal.quad(ids[0], ids[3], ids[2], ids[1])
+        }
+      }
+    }
+  }
+}
+
+function addSideGlass(glass: Builder, p: Profile): void {
+  for (const [x0, x1, y0, y1] of windowRects(p)) {
+    if (x1 - x0 < STEP || y1 - y0 < STEP) continue
+    const z = planWidth(p, (x0 + x1) / 2) - 0.008
+    for (const sign of [1, -1]) {
+      const ids = [
+        glass.at(x0, y0, sign * z),
+        glass.at(x1, y0, sign * z),
+        glass.at(x1, y1, sign * z),
+        glass.at(x0, y1, sign * z),
+      ]
+      if (sign > 0) glass.quad(ids[0], ids[1], ids[2], ids[3])
+      else glass.quad(ids[0], ids[3], ids[2], ids[1])
+    }
+  }
+}
+
 function addScreens(glass: Builder, p: Profile): void {
-  const windX = p.roofX1
-  screen(glass, windX, p.railY - 0.01, p.roofZ * 0.9, p.hoodX0 - 0.02, p.hoodY0 - 0.02, Math.min(0.78, p.sideZ - 0.04), 1)
-  const rearRun = 0.42
-  screen(glass, p.roofX0 + 0.04, p.railY - 0.01, p.roofZ * 0.84, p.roofX0 - rearRun, Math.min(p.railY - 0.12, 1.02), p.roofZ * 0.74, -1)
+  const windZ = Math.min(0.76, skinHalf(p, (p.roofX1 + p.hoodX0) / 2, 1) - 0.06)
+  screen(glass, p.roofX1, lat(p.railY), windZ, p.hoodX0, lat(sideTop(p, p.hoodX0)), windZ * 0.94, 1)
+  const rearZ = Math.min(0.72, skinHalf(p, p.roofX0, p.railY) - 0.08)
+  screen(glass, p.roofX0, lat(p.railY), rearZ, p.roofX0 - 0.48, lat(0.9), rearZ * 0.82, -1)
 }
 
 function screen(

@@ -78,9 +78,23 @@ export function applyCarStage(view: CarView, stage: number): void {
   const mat = view.shellMat
   if (!mat) return
   const painted = stage < 4
-  mat.color.set(painted ? 0x2c3238 : 0xe4e0d8)
-  mat.metalness = painted ? 0.64 : 0.42
-  mat.roughness = painted ? 0.2 : 0.38
+  // Stage 0–3 is the paint-shop shell: dark automotive clearcoat.
+  // Wheels and after are bare metal, still reflective, not a chalky primer.
+  if (painted) {
+    mat.color.set(0x14181d)
+    mat.metalness = 0.74
+    mat.roughness = 0.13
+    mat.clearcoat = 1
+    mat.clearcoatRoughness = 0.032
+    mat.envMapIntensity = 1.5
+  } else {
+    mat.color.set(0xc5ced6)
+    mat.metalness = 0.92
+    mat.roughness = 0.22
+    mat.clearcoat = 0.55
+    mat.clearcoatRoughness = 0.14
+    mat.envMapIntensity = 1.2
+  }
 }
 
 export function setRide(view: CarView, station: number): void {
@@ -209,7 +223,9 @@ async function loadEnvironment(scene: THREE.Scene) {
     const tex = await new RGBELoader().loadAsync(url)
     tex.mapping = THREE.EquirectangularReflectionMapping
     scene.environment = tex
-    scene.environmentIntensity = 0.2
+    // The hall stays matte. The car clearcoat multiplies this again, so the
+    // body can pick up the warehouse without turning the floor into a mirror.
+    scene.environmentIntensity = 0.55
   } catch (err) {
     console.warn(`HDR failed ${url}`, err)
   }
@@ -591,14 +607,14 @@ function buildFleet(kit: Kit): CarView[] {
 function paintShell(root: THREE.Object3D): THREE.MeshPhysicalMaterial | null {
   const painted = new THREE.MeshPhysicalMaterial({
     name: 'bodyPaint',
-    color: 0x2c3238,
-    metalness: 0.64,
-    roughness: 0.2,
+    color: 0x14181d,
+    metalness: 0.74,
+    roughness: 0.13,
     clearcoat: 1,
-    clearcoatRoughness: 0.06,
-    envMapIntensity: 0.45,
-    // The SimReady shell is double-sided. A front-only paint drops every
-    // sheet whose winding faces inward, and the car reads as torn open.
+    clearcoatRoughness: 0.032,
+    envMapIntensity: 1.5,
+    // Sheets from the seal are not consistently wound. Front-only paint
+    // would drop every panel whose normal faces inward.
     side: THREE.DoubleSide,
   })
   let found = false
@@ -650,13 +666,28 @@ function placeInBody(group: THREE.Object3D, kit: Kit, along: number, up: number,
 function wheelSet(kit: Kit): THREE.Group {
   const g = new THREE.Group()
   const lengthAxis = kit.bodySize.x >= kit.bodySize.z ? 'x' : 'z'
-  const spots: [number, number][] = [
-    [0.72, 0.46],
-    [0.72, -0.46],
-    [0.28, 0.46],
-    [0.28, -0.46],
-  ]
-  for (const [along, side] of spots) {
+  const stored = kit.body.userData.axles as { x: number, y: number, z: number }[] | undefined
+  const spots: [number, number, number][] = []
+  if (lengthAxis === 'x' && stored && stored.length) {
+    for (const axle of stored) spots.push([axle.x, axle.y, axle.z], [axle.x, axle.y, -axle.z])
+  } else {
+    for (const [along, side] of [[0.72, 0.46], [0.72, -0.46], [0.28, 0.46], [0.28, -0.46]] as const) {
+      if (lengthAxis === 'x') {
+        spots.push([
+          kit.bodyBox.min.x + kit.bodySize.x * along,
+          kit.bodyBox.min.y + 0.34,
+          kit.bodyBox.min.z + kit.bodySize.z * (side > 0 ? 0.92 : 0.08),
+        ])
+      } else {
+        spots.push([
+          kit.bodyBox.min.x + kit.bodySize.x * (side > 0 ? 0.92 : 0.08),
+          kit.bodyBox.min.y + 0.34,
+          kit.bodyBox.min.z + kit.bodySize.z * along,
+        ])
+      }
+    }
+  }
+  for (const [x, y, z] of spots) {
     const wheel = new THREE.Group()
     const tire = kit.tire.clone(true)
     const rim = kit.rim.clone(true)
@@ -666,20 +697,8 @@ function wheelSet(kit: Kit): THREE.Group {
     wheel.position.sub(center)
     const axle = new THREE.Group()
     axle.add(wheel)
-    if (lengthAxis === 'x') {
-      axle.position.set(
-        kit.bodyBox.min.x + kit.bodySize.x * along,
-        kit.bodyBox.min.y + 0.34,
-        kit.bodyBox.min.z + kit.bodySize.z * (side > 0 ? 0.92 : 0.08),
-      )
-    } else {
-      axle.position.set(
-        kit.bodyBox.min.x + kit.bodySize.x * (side > 0 ? 0.92 : 0.08),
-        kit.bodyBox.min.y + 0.34,
-        kit.bodyBox.min.z + kit.bodySize.z * along,
-      )
-      axle.rotation.y = Math.PI / 2
-    }
+    axle.position.set(x, y, z)
+    if (lengthAxis !== 'x') axle.rotation.y = Math.PI / 2
     enableCast(axle)
     g.add(axle)
   }
