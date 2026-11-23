@@ -3,16 +3,14 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { MeshoptSimplifier } from 'meshoptimizer/simplifier'
 
 /**
- * Plant GLBs are CAD tessellations (a shell alone is ~200k triangles, cloned
- * across the fleet). On the WebGL fallback that work, plus a shadow pass, is
- * enough to stall the GPU process until Chrome kills the context. These budgets
- * drop triangles that are smaller than the camera can show. PreserveFolds keeps
- * panel creases and truss edges.
+ * Plant GLBs are CAD tessellations. On the WebGL fallback that work, plus a
+ * shadow pass, is enough to stall the GPU process until Chrome kills the
+ * context. These budgets drop triangles the camera cannot use. The car's outer
+ * skin is exempt: simplifying it opens the panels. PreserveFolds keeps creases.
  */
 type Budget = { ratio: number, error: number, floor: number }
 
 const FILE_BUDGET: Record<string, Budget> = {
-  'body.glb': { ratio: 0.1, error: 0.004, floor: 8000 },
   'v6.glb': { ratio: 0.08, error: 0.012, floor: 5000 },
   'hall_straight.glb': { ratio: 0.16, error: 0.0035, floor: 8000 },
   'hall_corner.glb': { ratio: 0.14, error: 0.0035, floor: 8000 },
@@ -43,18 +41,27 @@ const KEEP_HIERARCHY = new Set(['cobot.glb', 'crew_0.glb', 'crew_1.glb', 'crew_2
 export async function prepareLoadedModel(root: THREE.Object3D, file: string): Promise<void> {
   if (!MeshoptSimplifier.supported) return
   await MeshoptSimplifier.ready
-  const budget = FILE_BUDGET[file] ?? DEFAULT_BUDGET
-  const geometries = new Set<THREE.BufferGeometry>()
+  const meshes: THREE.Mesh[] = []
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh
-    if (mesh.isMesh && mesh.geometry) geometries.add(mesh.geometry)
+    if (mesh.isMesh && mesh.geometry) meshes.push(mesh)
   })
   let n = 0
-  for (const geom of geometries) {
-    simplifyGeometry(geom, budget)
+  for (const mesh of meshes) {
+    simplifyGeometry(mesh.geometry, budgetFor(file, mesh))
     if (++n % 6 === 0) await new Promise((resolve) => setTimeout(resolve, 0))
   }
   if (!KEEP_HIERARCHY.has(file)) mergeStaticMeshes(root)
+}
+
+function budgetFor(file: string, mesh: THREE.Mesh): Budget {
+  if (file !== 'body.glb') return FILE_BUDGET[file] ?? DEFAULT_BUDGET
+  // The outer skin and the panels sealed over it are what the camera sees.
+  // Decimating them opens the shell. The inner frame stays hidden, so it can drop.
+  if (mesh.userData.seal || mesh.geometry.userData.noSimplify || !/inside/i.test(mesh.name)) {
+    return { ratio: 1, error: 0, floor: Number.POSITIVE_INFINITY }
+  }
+  return { ratio: 0.08, error: 0.012, floor: 4000 }
 }
 
 function simplifyGeometry(geom: THREE.BufferGeometry, budget: Budget): void {
@@ -127,6 +134,8 @@ function mergeStaticMeshes(root: THREE.Object3D): void {
     for (const geom of baked) geom.dispose()
     if (!merged) continue
     const mesh = new THREE.Mesh(merged, list[0].material)
+    mesh.name = list[0].name
+    mesh.userData = { ...list[0].userData }
     mesh.receiveShadow = true
     mesh.castShadow = list.some((item) => item.castShadow)
     root.add(mesh)

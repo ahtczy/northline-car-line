@@ -93,12 +93,12 @@ async function boot() {
     renderer.shadowMap.enabled = true
     renderer.shadowMap.type = THREE.PCFShadowMap
     renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 0.64
+    renderer.toneMappingExposure = 0.74
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, glFallback ? 1 : 1.5))
 
-    scene.add(new THREE.HemisphereLight(0xddd6c8, 0x6f6a60, 0.11))
-    const sun = new THREE.DirectionalLight(0xfff1dc, 1.35)
+    scene.add(new THREE.HemisphereLight(0xe7eef6, 0x6e6a62, 0.28))
+    const sun = new THREE.DirectionalLight(0xfff4e5, 1.15)
     sun.position.set(-22, 34, 16)
     sun.castShadow = true
     // The shadow camera covers the whole aisle. 4096 is a 64 MB+ depth target and
@@ -113,10 +113,10 @@ async function boot() {
     cam.far = 110
     sun.shadow.bias = -0.00025
     sun.shadow.normalBias = 0.02
-    sun.shadow.radius = 1.6
+    sun.shadow.radius = 2
     sun.target.position.set(-12, 0, 0)
     scene.add(sun, sun.target)
-    const fill = new THREE.DirectionalLight(0xd7e6f6, 0.06)
+    const fill = new THREE.DirectionalLight(0xd5e4f4, 0.22)
     fill.position.set(48, 24, -36)
     scene.add(fill)
 
